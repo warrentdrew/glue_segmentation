@@ -12,8 +12,12 @@
 #include <math.h>
 #include <time.h>
 #include <string>
+#include <map>
 #include <io.h>
 #include <iostream>
+#include <unordered_map>
+#include <unordered_map>
+
 
 #define CX_DEBUG    1
 #define USING_TMPLATE_MATCHING 1
@@ -857,44 +861,116 @@ void getFiles(string path, vector<string>& files)
 }
 */
 
-unordered_map<String, Integer> defineRegion() {
+unordered_map<string, int> defineRegion() {
     //TODO
     /**
     * @brief Find the center of each ROI mask (region of interest)
     * @param
     */
 
-    unordered_map<String, Integer> ret =  {{"f5_C_mask.bmp": 484},
-                                            {"f6_C_mask.bmp": 467},
-                                            {"f1_C_mask.bmp": 583},
-                                            {"f4_C_mask.bmp": 502},
-                                            {"f3_C_mask.bmp": 502},
-                                            {"f2_C_mask.bmp": 533}
-                                          };
-    return ret
+    unordered_map<string, int> ret;
+    ret["f5_C_mask.bmp"] = 484;
+    ret["f6_C_mask.bmp"] = 467;
+    ret["f1_C_mask.bmp"] = 583;
+    ret["f4_C_mask.bmp"] = 502;
+    ret["f3_C_mask.bmp"] = 502;
+    ret["f2_C_mask.bmp"] = 533;
+
+    return ret;
 }
 
-void hardmax(Mat &m) {
-    for (int i = 0; i < m.rows; i++) {
+Mat processOutput(Mat m) { //4-dimensional Mat with NCHW dimensions order.
+    Mat ret = Mat(m.size[2], m.size[3], CV_8UC1);
+    //float* pt0 = m.ptr<float>(0);
+    //float* pt1 = &pt0[0];
+
+
+    for (int i = 0; i < m.size[2]; i++) {
         float* data = m.ptr<float>(i);
-        for (int j = 0; j < m.cols; j++) {
-            if (data[j] >= 0.5) data[j] = 1;
-            else data[j] = 0;
+        for (int j = 0; j < m.size[3]; j++) {
+            if (data[j] >= 0.5) ret.at<uchar>(j, i) = 255;
+            else ret.at<uchar>(j, i) = 0;
         }
     }
+    //cout << ret <<endl;
+
+    return ret;
+
 }
 
-cv::Mat forwardProp(dnn::Net net, Mat blob){
+Mat forwardProp(dnn::Net net, Mat blob){
     net.setInput(blob);
     Mat output = net.forward();
-    hardmax(output);
-    return output;
+    Mat ret = processOutput(output);
+    //cout << "check output" << endl;
+    //cout << output.size << endl;
+    return ret;
 }
 
-int glueDetectionDnn(Mat img, String weights, int cropsize, int offset){
-    dnn::Net net = cv::dnn::readNetFromTensorflow(weights);
-    cv::Mat blob = cv::dnn::blobFromImage(img, 1./255, Size(cropsize,cropsize), 127.0);
+void predict(dnn::Net net, Mat img, Mat &retMask, int center, int offset, int cropsize) {
+    int h = img.rows;
+    int w = img.cols;
+    cout << "t1" << img.rows << endl;
+    int startx = max(center - offset, 0);
+    int endx = min(center + offset, w);
 
+    for (int i = 0; i < h; i += cropsize) {
+        for (int j = startx; j < endx; j += cropsize) {
+            Mat curr = img(Rect(i, j, cropsize, cropsize));
+            cout << "aa"<< curr.size <<endl;
+            retMask(Rect(i, j, cropsize, cropsize)) = forwardProp(net, curr);
+
+        }
+    }
+
+}
+
+int getCenterFromName(string name) {
+    unordered_map<string, int> centermap = defineRegion();
+    int center = centermap[name];
+    return center;
+}
+
+
+void glueDetectionDnn(Mat img, Mat &retMask, string weights, int center, int cropsize, int offset){
+
+    int h = img.rows;
+    int w = img.cols;
+    //int cropNum = (h * w) / (cropsize * cropsize);
+    //vector<Mat> matlist;
+
+    dnn::Net net = cv::dnn::readNetFromTensorflow(weights);
+
+    int startx = max(center - offset, 0);
+    int endx = min(center + offset, w);
+
+    for (int i = 0; i < h; i += cropsize) {
+        for (int j = startx; j < endx; j += cropsize) {
+
+            Mat curr = img(Rect(j, i, cropsize, cropsize));
+             namedWindow("test1", WINDOW_AUTOSIZE);
+            imshow("test1", curr);
+            waitKey(0);
+            //cout << curr.size << endl;
+            //retMask(Rect(i, j, cropsize, cropsize)) = forwardProp(net, curr);
+            //matlist.push_back(curr);
+            cv::Mat blob = cv::dnn::blobFromImage(curr, 1./255, Size(cropsize,cropsize), 127.0, false, false, CV_32F);
+            //cout << blob.size << endl;
+            forwardProp(net, blob).copyTo(retMask(Rect(j, i, cropsize, cropsize)));
+            //cout << retMask(Rect(i, j, cropsize, cropsize)) <<endl;
+            namedWindow("test2", WINDOW_AUTOSIZE);
+            imshow("test2", retMask(Rect(j, i, cropsize, cropsize)));
+            waitKey(0);
+        }
+    }
+
+
+
+
+    //cv::Mat blob = cv::dnn::blobFromImage(img, 1./255, Size(cropsize,cropsize), 127.0, false, false, CV_32FC1);
+    //blob here has type CV_8U, can cause accuracy problem
+
+    //return retMask;
 
 }
 
@@ -906,16 +982,20 @@ int main()
     Mat img = imread("/home/zhuyipin/CV/GlueSegmentation/images/01409758_ASBLD0901_AS22_1_OK.bmp");
     Mat img_maskimg = imread("/home/zhuyipin/CV/GlueSegmentation/images/01409758_ASBLD0901_AS22_1_OK.bmp");
     Mat img_mask = imread("/home/zhuyipin/CV/GlueSegmentation/images/f1_C_mask.bmp");
-    String modelpath = "/home/zhuyipin/CV/GlueSegmentation/models/unet_sh32.pb";
+    string modelpath = "/home/zhuyipin/CV/GlueSegmentation/models/unet_sh32.pb";
 
     Mat gray;
     Mat gray_mask;
     Mat gray_maskimg;
 
+
+
+
     cvtColor(img, gray, CV_BGR2GRAY);
     cvtColor(img_maskimg, gray_maskimg, CV_BGR2GRAY);
     cvtColor(img_mask, gray_mask, CV_BGR2GRAY);
     /*label of size per pixel and the correct glue size range*/
+
     double sizePerPixel = 1;
     double min_glue_thd = 9;
     double max_glue_thd = 14;
@@ -927,8 +1007,23 @@ int main()
     int type_line = 1;
     int width = img.cols;
     int height = img.rows;
-    Mat retImg = Mat(Size(width, height), CV_8UC3); //8 bit with 3 channels
+    Mat retImg = Mat(Size(width, height), CV_32FC1); //8 bit with 3 channels
     double retValue[6];
+
+    int cropsize = 160;
+    int offset = 240;
+
+    int center = getCenterFromName("f1_C_mask.bmp");
+    //cout << "what is gray" << gray.rows << endl;
+    Mat retMask = Mat::zeros(img.rows, img.cols, CV_8UC1);
+    glueDetectionDnn(gray, retMask, modelpath, center, cropsize, offset);
+
+    double minp = 0.0, maxp = 0.0;
+    minMaxIdx(retMask, &minp, &maxp);
+    cout << minp << " " <<  maxp<< endl;
+    namedWindow("test", WINDOW_AUTOSIZE);
+    imshow("test", retMask);
+    waitKey(0);
 
 
     //gray: img convert to gray, 3 channels  to 1 channel
@@ -941,6 +1036,7 @@ int main()
     //inputvalue[6]: 9, 12, 0.1
 
     //GlueDetectionAlgorithm(gray.data, gray_maskimg.data, gray_mask.data, retImg.data, type_line, width, height, retValue, inputValue);
+/*
     glueDetectionDnn(modelpath)
 
     double min_measure = retValue[0] * sizePerPixel; //returnValue
@@ -961,7 +1057,7 @@ int main()
         printf("running result,glue min=%f,max=%f,pass!\r\n", min_measure, max_measure);
 
     imwrite("/home/zhuyipin/CV/GlueSegmentation/images/ret/ret.jpg", retImg);
-
+*/
 
 	return 0;
 
